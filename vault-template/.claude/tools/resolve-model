@@ -1,0 +1,115 @@
+#!/usr/bin/env python3
+# resolve-model — the brain's deterministic model-route resolver.
+#
+# ONE JOB: given the role→model bindings file and a role, return the model that role
+#   should run on. This realises the kernel's `model-route` primitive as a pure lookup
+#   (OPERATIONS-KERNEL.md §11/§12; MODEL-RETRIEVAL.md §2.2; the tool kind, BUILDER.md §3).
+#   Its callers are the Builder, which stamps a new instrument's `model:` from it
+#   (BUILDER.md §4), and any future orchestrator that spawns model-bound workers.
+#
+# INPUTS:
+#   - positional 1: the bindings file (instance config — `model-bindings.md`; the engine
+#     ships a commented placeholder template, populated at S19).
+#   - positional 2: the role to resolve (e.g. reasoning | synthesis | extraction |
+#     embedding | <any role a binding names>).
+#   - optional `--default MODEL`: the session model the CALLER passes in. The kernel rule
+#     is "absent a declaration, the session model is used" (§11). This tool never reads
+#     session state itself — core.md is a lagging cache (§10) and reading it would break
+#     determinism (the same reason session-reconcile takes --now). The caller owns
+#     "what is the session on" and passes it here.
+#   Reads ONLY the bindings file. Binding lines are `- <role>: <model>` (leading dash
+#   optional); blank lines, `#`/`<!-- -->` comments, and headings are ignored.
+#
+# OUTPUTS: the resolved model on stdout (one line, no trailing prose). Resolution order:
+#   bound role wins; else --default if given; else the sentinel `(session-model)` so the
+#   caller falls back to whatever the session runs on. Exit 0 on any resolution. A
+#   duplicate binding for one role, or a malformed bindings file, → stderr, exit 2.
+#
+# BOUNDS: deterministic given (bindings file, role, default) — no clock, no env, no
+#   session read, NO network, NO credentials. A pure function, by design (a tool).
+
+import os
+import re
+import sys
+
+# A binding line: "- reasoning: claude-opus-4-8" or "reasoning: claude-opus-4-8".
+# The model value runs to end-of-line so version-suffixed ids survive intact; an inline
+# "#" comment after the value is trimmed.
+BINDING = re.compile(r"^\s*(?:-\s*)?(?P<role>[A-Za-z][\w-]*)\s*:\s*(?P<model>\S.*?)\s*$")
+HEADING = re.compile(r"^\s*#")  # markdown heading or "#"-comment line — never a binding
+SENTINEL = "(session-model)"
+
+
+def parse_bindings(path):
+    """Parse the bindings file into a role→model map.
+
+    Skips blank lines, headings, and comment lines. Raises ValueError on a duplicate
+    role so a silent shadowing binding never decides which model a route gets.
+    """
+    bindings = {}
+    with open(path, encoding="utf-8") as handle:
+        for raw in handle:
+            line = raw.rstrip("\n")
+            stripped = line.strip()
+            if not stripped or HEADING.match(stripped) or stripped.startswith("<!--"):
+                continue
+            match = BINDING.match(line)
+            if not match:
+                continue
+            role = match.group("role")
+            model = match.group("model").split("#", 1)[0].strip()
+            if not model:
+                continue
+            if role in bindings:
+                raise ValueError(f"duplicate binding for role '{role}'")
+            bindings[role] = model
+    return bindings
+
+
+def resolve(bindings, role, default):
+    """Bound role wins; else the caller's session model; else the sentinel."""
+    if role in bindings:
+        return bindings[role]
+    if default is not None:
+        return default
+    return SENTINEL
+
+
+def parse_args(argv):
+    """Resolve (bindings_file, role, default) from argv."""
+    positionals = []
+    default = None
+    i = 1
+    while i < len(argv):
+        token = argv[i]
+        if token == "--default":
+            default = argv[i + 1]
+            i += 2
+        else:
+            positionals.append(token)
+            i += 1
+    if len(positionals) != 2:
+        raise ValueError("usage: resolve-model <bindings-file> <role> [--default MODEL]")
+    return positionals[0], positionals[1], default
+
+
+def main():
+    try:
+        bindings_file, role, default = parse_args(sys.argv)
+    except (ValueError, IndexError) as error:
+        print(f"resolve-model: bad arguments: {error}", file=sys.stderr)
+        return 2
+    if not os.path.isfile(bindings_file):
+        print(f"resolve-model: no such bindings file: {bindings_file}", file=sys.stderr)
+        return 2
+    try:
+        bindings = parse_bindings(bindings_file)
+    except ValueError as error:
+        print(f"resolve-model: {error}", file=sys.stderr)
+        return 2
+    print(resolve(bindings, role, default))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

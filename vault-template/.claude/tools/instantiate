@@ -1,0 +1,354 @@
+#!/usr/bin/env python3
+# instantiate — the brain's deterministic instantiation scaffolder.
+#
+# ONE JOB: stamp a live instance (`Pulse-<owner>-Brain`) out of the engine, exactly and
+#   safely, so a stranger's `git clone` becomes a working private brain with one command.
+#   It is the deterministic filesystem half of the instantiation kit (S19); the judgement
+#   half — the interview, the embedding choice, the cron/hook/watchlist/.env wiring — is
+#   the `/setup` skill, which collects the answers and calls this with them.
+#   (Instantiation kit, SETUP.md / ARCHITECTURE.md §1; the tool kind, BUILDER.md §3.)
+#
+# TOPOLOGY (Model A — preserve the engine's nesting so every instrument→doc link
+#   resolves untouched): the instance is a stamped copy of the engine tree —
+#     <target>/                       authority docs (UNSTAMPED) + .gitignore + .env.example
+#     <target>/.claude/CLAUDE.md       the dual-role director (STAMPED)
+#     <target>/vault/                  the live Obsidian vault (stamped vault-template/*)
+#   Claude Code launches from <target>; Obsidian opens <target>/vault.
+#
+# INPUTS (argparse):
+#   --target PATH        (required) the instance dir to create — MUST be outside the engine.
+#   --owner NAME         (required) value for {{OWNER}}.
+#   --company NAME       (required) value for {{COMPANY}}.
+#   --domains a,b,c      (required) the owner's domains — the pillar subdirs to scaffold
+#                        (canon also always gets the canon-only `entities`).
+#   --preset NAME        (optional) active_preset to seed into core.md; must name a file in
+#                        the copied presets/, else exit 1.
+#   --engine-root PATH   (optional) source engine; default = three levels up from this file.
+#   --now "YYYY-MM-DD HH:MM"  (optional) timestamp for seeded core.md/log.md; default clock.
+#                        Explicit for reproducible tests (the session-reconcile precedent).
+#   --dry-run            (optional) print the plan and exit 0 without writing.
+#
+# OUTPUTS: a deterministic report on stdout. Stamps {{OWNER}}/{{COMPANY}} on the OPERATIONAL
+#   surfaces only (vault/* + the instance .claude/CLAUDE.md); the authority docs are copied
+#   UNSTAMPED (generic instruction — stamping would mangle the passages that document the
+#   placeholder convention). Verifies no operational placeholder survives (fail closed).
+#   Exit 0 = instance created and verified (or --dry-run). Exit 1 = recoverable refusal
+#   (target non-empty, bad --domains, --preset not found). Exit 2 = hard failure (target
+#   inside the engine, engine-root missing, a placeholder survived → an INSTANTIATION-FAILED
+#   marker is left so the partial instance is never mistaken for live). Errors → stderr.
+#
+# BOUNDS: deterministic given (engine content, args, now); the engine is only ever READ;
+#   the instance is written outside it. NO network, NO credentials — the interview and any
+#   model/credential choice belong to the `/setup` skill, never this tool.
+
+import argparse
+import os
+import re
+import shutil
+import sys
+from datetime import datetime
+
+TS = "%Y-%m-%d %H:%M"
+OWNER_TOKEN = "{{OWNER}}"
+COMPANY_TOKEN = "{{COMPANY}}"
+CANON_ONLY_DOMAIN = "entities"
+PILLARS = ("canon", "inbox", "dynamic")
+DOMAIN_NAME = re.compile(r"^[a-z0-9][a-z0-9-]*$")  # safe dir name: kebab-case, no traversal
+
+# Copied to the instance root verbatim alongside the authority *.md (UNSTAMPED reference /
+# config). .env.example seeds the owner's credential file. The engine's OWN .gitignore is
+# NOT copied — it ignores `/vault/` (engine-specific), which would ignore the INSTANCE's
+# live vault; the instance gets a generated, instance-appropriate .gitignore instead.
+ROOT_EXTRA_FILES = (".env.example", "LICENSE")
+
+# The instance's own .gitignore: keep secrets + derived/runtime state out of git, but the
+# vault content IS the owner's brain (they may version it in a PRIVATE repo) — so, unlike
+# the engine's .gitignore, it does NOT ignore vault/.
+INSTANCE_GITIGNORE = """\
+# Pulse instance — secrets + derived/runtime state stay out of git.
+# Your vault/ content IS your brain; version it in a PRIVATE repo if you wish.
+.env
+.env.*
+!.env.example
+.obsidian/
+.trash/
+**/substrate/store/
+*.shard
+*.vec
+*.faiss
+*.ann
+*.safetensors
+*.onnx
+*.gguf
+.pulse-model-cache/
+__pycache__/
+*.pyc
+.DS_Store
+"""
+
+# Never copied — derived/runtime state and secrets (the .gitignore classes), so no stale
+# index, model cache, Obsidian config, or secret rides into the instance.
+EXCLUDE_DIRS = {".git", ".obsidian", ".trash", "__pycache__", "store", ".pulse-model-cache",
+                "node_modules", ".venv", "venv", ".pytest_cache", ".mypy_cache", ".ruff_cache"}
+EXCLUDE_SUFFIXES = (".shard", ".vec", ".faiss", ".ann", ".safetensors", ".onnx", ".gguf",
+                    ".pyc", ".DS_Store")
+
+
+def fail(message, code):
+    print(f"instantiate: {message}", file=sys.stderr)
+    return code
+
+
+def is_excluded(name):
+    return name in EXCLUDE_DIRS or name.startswith(".env") and name != ".env.example" \
+        or any(name.endswith(suffix) for suffix in EXCLUDE_SUFFIXES)
+
+
+def copy_tree(src, dst):
+    """Recursively copy src → dst, honouring the exclude classes. Deterministic order."""
+    os.makedirs(dst, exist_ok=True)
+    for name in sorted(os.listdir(src)):
+        if is_excluded(name):
+            continue
+        src_path = os.path.join(src, name)
+        dst_path = os.path.join(dst, name)
+        if os.path.isdir(src_path):
+            copy_tree(src_path, dst_path)
+        else:
+            shutil.copy2(src_path, dst_path)
+
+
+def stamp_file(path, owner, company):
+    """Replace the placeholder tokens in one text file (atomic). Binary files are skipped."""
+    try:
+        with open(path, encoding="utf-8") as handle:
+            text = handle.read()
+    except (UnicodeDecodeError, IsADirectoryError):
+        return
+    stamped = text.replace(OWNER_TOKEN, owner).replace(COMPANY_TOKEN, company)
+    if stamped != text:
+        write_atomic(path, stamped)
+
+
+def write_atomic(path, text):
+    """temp-then-rename with a process-unique temp, so an interrupted write never tears a
+    file (the session-reconcile precedent)."""
+    tmp = f"{path}.{os.getpid()}.tmp"
+    with open(tmp, "w", encoding="utf-8") as handle:
+        handle.write(text)
+    os.replace(tmp, path)
+
+
+def stamp_tree(root, owner, company):
+    """Stamp every text file under root (the operational surfaces)."""
+    for current, dirs, files in os.walk(root):
+        dirs[:] = sorted(d for d in dirs if d not in EXCLUDE_DIRS)
+        for name in sorted(files):
+            stamp_file(os.path.join(current, name), owner, company)
+
+
+def scaffold_domains(vault, domains):
+    """Make each pillar's domain subdirs match the owner's list exactly (+ entities under
+    canon). Removes shipped example domains not chosen; adds chosen ones with a .gitkeep."""
+    for pillar in PILLARS:
+        pillar_dir = os.path.join(vault, pillar)
+        keep = set(domains) | ({CANON_ONLY_DOMAIN} if pillar == "canon" else set())
+        for existing in sorted(os.listdir(pillar_dir)):
+            path = os.path.join(pillar_dir, existing)
+            if os.path.isdir(path) and existing not in keep:
+                shutil.rmtree(path)  # an example domain the owner did not choose
+        for domain in sorted(keep):
+            domain_dir = os.path.join(pillar_dir, domain)
+            os.makedirs(domain_dir, exist_ok=True)
+            open(os.path.join(domain_dir, ".gitkeep"), "a").close()
+
+
+def seed_core(vault, preset, now):
+    """Set core.md's derivable anchors: active_preset and updated."""
+    path = os.path.join(vault, "memory", "core.md")
+    with open(path, encoding="utf-8") as handle:
+        text = handle.read()
+    text = re.sub(r"(?m)^active_preset:.*$", f"active_preset: {preset or ''}".rstrip(), text)
+    text = re.sub(r"(?m)^updated:.*$", f"updated: {now}", text)
+    write_atomic(path, text)
+
+
+def seed_index(vault, domains):
+    """Regenerate index.md's `## Domains` block from the owner's domains."""
+    path = os.path.join(vault, "index.md")
+    with open(path, encoding="utf-8") as handle:
+        text = handle.read()
+    block = ["## Domains", "<!-- For each domain, link the key entry pages of the wiki. -->"]
+    block += [f"- **{d}** — <!-- key entry pages -->" for d in domains]
+    block.append(f"- **{CANON_ONLY_DOMAIN}** (canon-only) —")
+    rebuilt = "\n".join(block)
+    # Replace from "## Domains" up to the next "## " heading OR end-of-file (the \Z anchor
+    # so it still matches when Domains is the last section — never appending a duplicate).
+    new_text, count = re.subn(r"(?ms)^## Domains.*?(?=^## |\Z)", rebuilt + "\n\n", text, count=1)
+    write_atomic(path, new_text if count else text + "\n\n" + rebuilt + "\n")
+
+
+def seed_log(vault, owner, domains, now):
+    """Append the first evolution-log entry: the instance was created."""
+    path = os.path.join(vault, "log.md")
+    with open(path, encoding="utf-8") as handle:
+        text = handle.read().rstrip("\n")
+    entry = (
+        f"\n\n## {now} — Brain instantiated\n"
+        f"- **what:** instance created from the Pulse_Brain engine\n"
+        f"- **where:** all pillars (canon · inbox · dynamic), domains: {', '.join(domains)}\n"
+        f"- **why:** setup (S19 instantiation kit)\n"
+    )
+    write_atomic(path, text + entry)
+
+
+def find_placeholders(root):
+    """Return the operational files that still contain a placeholder token (should be none)."""
+    offenders = []
+    for current, dirs, files in os.walk(root):
+        dirs[:] = [d for d in dirs if d not in EXCLUDE_DIRS]
+        for name in sorted(files):
+            path = os.path.join(current, name)
+            try:
+                with open(path, encoding="utf-8") as handle:
+                    text = handle.read()
+            except (UnicodeDecodeError, IsADirectoryError):
+                continue
+            if OWNER_TOKEN in text or COMPANY_TOKEN in text:
+                offenders.append(path)
+    return offenders
+
+
+def parse_args(argv):
+    parser = argparse.ArgumentParser(prog="instantiate", add_help=True)
+    parser.add_argument("--target", required=True)
+    parser.add_argument("--owner", required=True)
+    parser.add_argument("--company", required=True)
+    parser.add_argument("--domains", required=True)
+    parser.add_argument("--preset", default=None)
+    parser.add_argument("--engine-root", default=None, dest="engine_root")
+    parser.add_argument("--now", default=None)
+    parser.add_argument("--dry-run", action="store_true", dest="dry_run")
+    return parser.parse_args(argv)
+
+
+def resolve_engine_root(explicit):
+    if explicit:
+        return os.path.realpath(os.path.expanduser(explicit))
+    # tools/ → .claude/ → vault-template/ → engine-root
+    here = os.path.dirname(os.path.realpath(__file__))
+    return os.path.realpath(os.path.join(here, "..", "..", ".."))
+
+
+def main(argv):
+    args = parse_args(argv)
+
+    engine_root = resolve_engine_root(args.engine_root)
+    if not os.path.isfile(os.path.join(engine_root, "ARCHITECTURE.md")) or \
+            not os.path.isdir(os.path.join(engine_root, "vault-template")):
+        return fail(f"engine root not found or malformed: {engine_root}", 2)
+
+    target = os.path.realpath(os.path.expanduser(args.target))
+
+    # --- data-boundary guard: never write inside the engine -------------------------------
+    if target == engine_root or os.path.commonpath([target, engine_root]) == engine_root:
+        return fail(f"refusing: target is inside the engine repo ({engine_root}). "
+                    "The instance MUST be a separate directory outside the engine.", 2)
+
+    domains = [d.strip() for d in args.domains.split(",") if d.strip()]
+    if not domains:
+        return fail("no --domains given", 1)
+    bad = [d for d in domains if not DOMAIN_NAME.match(d) or d == CANON_ONLY_DOMAIN]
+    if bad:
+        return fail(f"invalid domain name(s): {', '.join(bad)} "
+                    f"(kebab-case, and '{CANON_ONLY_DOMAIN}' is the reserved canon-only domain)", 1)
+    domains = list(dict.fromkeys(domains))  # dedupe, keep order
+
+    # --preset is validated UP FRONT (against the engine's presets/) so a typo fails before
+    # anything is copied — never leaving a half-built, unstamped partial instance behind.
+    if args.preset and not os.path.isfile(
+            os.path.join(engine_root, "vault-template", "presets", f"{args.preset}.md")):
+        return fail(f"--preset '{args.preset}' not found in the engine's presets/ — author it "
+                    "first (the /setup skill does this), then re-run", 1)
+
+    if os.path.exists(target) and os.listdir(target):
+        return fail(f"target exists and is not empty: {target} — choose a fresh path, or delete "
+                    "it deliberately and re-run (re-instantiation is never a silent overwrite)", 1)
+
+    if args.now is not None:
+        try:
+            datetime.strptime(args.now.strip(), TS)
+        except ValueError:
+            return fail(f'--now must be "YYYY-MM-DD HH:MM": {args.now}', 1)
+    now = (args.now or datetime.now().strftime(TS)).strip()
+
+    if args.dry_run:
+        print(plan_report(engine_root, target, args, domains, now))
+        return 0
+
+    # --- copy the engine tree (Model A) ---------------------------------------------------
+    os.makedirs(target, exist_ok=True)
+    for name in sorted(os.listdir(engine_root)):
+        if name.endswith(".md") or name in ROOT_EXTRA_FILES:
+            src = os.path.join(engine_root, name)
+            if os.path.isfile(src):
+                shutil.copy2(src, os.path.join(target, name))
+    # the dual-role director, at instance root
+    os.makedirs(os.path.join(target, ".claude"), exist_ok=True)
+    shutil.copy2(os.path.join(engine_root, ".claude", "CLAUDE.md"),
+                 os.path.join(target, ".claude", "CLAUDE.md"))
+    # the instance's own .gitignore (generated — NOT the engine's, which ignores vault/)
+    write_atomic(os.path.join(target, ".gitignore"), INSTANCE_GITIGNORE)
+    # the live vault
+    vault = os.path.join(target, "vault")
+    copy_tree(os.path.join(engine_root, "vault-template"), vault)
+
+    # --- scaffold owner domains, stamp operational surfaces, seed empty state --------------
+    scaffold_domains(vault, domains)
+    stamp_tree(vault, args.owner, args.company)
+    stamp_file(os.path.join(target, ".claude", "CLAUDE.md"), args.owner, args.company)
+    seed_core(vault, args.preset, now)
+    seed_index(vault, domains)
+    seed_log(vault, args.owner, domains, now)
+
+    # --- verify no operational placeholder survives (fail closed) -------------------------
+    offenders = find_placeholders(vault) + find_placeholders(os.path.join(target, ".claude"))
+    if offenders:
+        marker = os.path.join(target, "INSTANTIATION-FAILED")
+        write_atomic(marker, "Placeholders survived stamping in:\n" + "\n".join(offenders) + "\n")
+        return fail(f"{len(offenders)} file(s) still contain a placeholder after stamping; "
+                    f"left {marker} — do NOT treat this instance as live", 2)
+
+    print(done_report(target, args, domains, now))
+    return 0
+
+
+def plan_report(engine_root, target, args, domains, now):
+    return (
+        "instantiate (dry run)\n"
+        f"  engine:  {engine_root}\n"
+        f"  target:  {target}\n"
+        f"  owner:   {args.owner}    company: {args.company}\n"
+        f"  domains: {', '.join(domains)} (+ {CANON_ONLY_DOMAIN} in canon)\n"
+        f"  preset:  {args.preset or '(none)'}\n"
+        f"  now:     {now}\n"
+        "  would: copy authority docs (unstamped) + .claude/CLAUDE.md (stamped) to <target>; "
+        "copy vault-template -> <target>/vault; scaffold domains; stamp operational surfaces; "
+        "seed core/index/log; verify no placeholder survives."
+    )
+
+
+def done_report(target, args, domains, now):
+    return (
+        "instantiate: instance created and verified clean\n"
+        f"  target:  {target}\n"
+        f"  owner:   {args.owner}    company: {args.company}\n"
+        f"  domains: {', '.join(domains)} (+ {CANON_ONLY_DOMAIN} in canon)\n"
+        f"  preset:  {args.preset or '(none)'}    seeded: {now}\n"
+        "  next: launch Claude Code from <target> and run /pulse; open <target>/vault in Obsidian.\n"
+        "  the instance is OUTSIDE the engine and never committed to it."
+    )
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

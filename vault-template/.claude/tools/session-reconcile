@@ -1,0 +1,302 @@
+#!/usr/bin/env python3
+# session-reconcile — the brain's deterministic multi-tab session reconciler.
+#
+# ONE JOB: keep concurrent CLI sessions consistent over the one shared vault, in two
+#   confined operations — compact the append-only session-presence note (reaping
+#   crashed/closed tabs) and report whether the core.md cache has gone stale against
+#   the log.md ledger. It heals; it does not lock or prevent.
+#   (Development layer, DEVELOPMENT.md §5/§6; the tool kind, BUILDER.md §3.)
+#
+# INPUTS:
+#   - optional argument 1: the vault root (default: current directory).
+#   - optional `--now "YYYY-MM-DD HH:MM"`: the current time (default: system clock).
+#     Reaping is relative to now, so now is an explicit input — same vault + same now
+#     → same result. The production triggers (SessionEnd hook, periodic tick) run
+#     against the wall clock; pass --now only for reproducible tests.
+#     `--stale-minutes N` overrides the staleness window (default 60 — it must exceed
+#     the longest expected quiet-but-live span, e.g. one long integration; clean exits
+#     are cleared instantly by the SessionEnd hook regardless).
+#   Reads `memory/sessions.md` (the append-only presence note), and — read-only —
+#   `memory/core.md` (frontmatter `updated`) and `log.md` (newest entry timestamp).
+#
+# OUTPUTS:
+#   - REWRITES `memory/sessions.md` to its compacted current view (atomic temp-then-
+#     rename): latest beat per session-id, `state: closing` sessions dropped, and
+#     sessions whose `last_active` is older than the staleness window reaped. This is
+#     the tool's OWN file — it writes nothing in the canon/core/log tiers.
+#   - prints a deterministic report on stdout: which sessions were reaped (stale) or
+#     closed, the live set, and the core.md cache status (clean | lag | stale).
+#   Exit 0 when nothing needed healing; exit 1 when a stale session was reaped OR
+#   core.md is `stale` (lags the log with NO live session — a real lost write). A clean
+#   `closing` drop, and core.md `lag` while a session is live mid-write, are both
+#   normal and stay exit 0 so a caller never gates on an in-flight write. Errors →
+#   stderr, exit 2.
+#
+# BOUNDS: deterministic given (vault, now); reads/writes the LOCAL vault only; NO
+#   network and NO credentials. It does NOT repair core.md — which derivable anchor to
+#   correct, and the write, are the kernel's on next load (DEVELOPMENT.md §4). Index/
+#   edge-map integrity is graph-health-scan's lane, not this tool's.
+
+import os
+import re
+import sys
+from datetime import datetime, timedelta
+
+SESSIONS = os.path.join("memory", "sessions.md")
+CORE = os.path.join("memory", "core.md")
+LOG = "log.md"
+
+DEFAULT_STALE_MINUTES = 60  # generous: a falsely-reaped live tab re-announces on its
+#   next write, but a wrongly-reaped tab loses its hot-page coordination hint until
+#   then, so the window must exceed a realistic quiet-but-live span (DEVELOPMENT.md §5).
+TS = "%Y-%m-%d %H:%M"
+# A beat header: "## <session-id> — <YYYY-MM-DD HH:MM>" (em dash or hyphen).
+BEAT_HEADER = re.compile(r"^##\s+(?P<sid>.+?)\s+[—-]\s+(?P<ts>\d{4}-\d{2}-\d{2} \d{2}:\d{2})\s*$")
+FIELD = re.compile(r"^-\s*(?P<key>scope|state|last_active)\s*:\s*(?P<val>.*?)\s*$")
+# A log entry header: "## <YYYY-MM-DD HH:MM> — <title>".
+LOG_HEADER = re.compile(r"^##\s+(?P<ts>\d{4}-\d{2}-\d{2} \d{2}:\d{2})\s+[—-]\s+")
+# A core.md frontmatter line: "updated: <YYYY-MM-DD HH:MM>" (trailing comment allowed).
+CORE_UPDATED = re.compile(r"^updated:\s*(?P<ts>\d{4}-\d{2}-\d{2} \d{2}:\d{2})")
+
+
+def parse_now(argv):
+    """Resolve (vault_root, now, stale_minutes) from argv. now defaults to the clock."""
+    vault_root = "."
+    now = None
+    stale_minutes = DEFAULT_STALE_MINUTES
+    i = 1
+    positional_taken = False
+    while i < len(argv):
+        token = argv[i]
+        if token == "--now":
+            now = datetime.strptime(argv[i + 1].strip(), TS)
+            i += 2
+        elif token == "--stale-minutes":
+            stale_minutes = int(argv[i + 1])
+            i += 2
+        elif not positional_taken:
+            vault_root = token
+            positional_taken = True
+            i += 1
+        else:
+            raise ValueError(f"unexpected argument: {token}")
+    if now is None:
+        now = datetime.now().replace(second=0, microsecond=0)
+    return vault_root, now, stale_minutes
+
+
+def parse_beat_timestamp(value):
+    """A beat's effective time is its last_active if present, else its header time."""
+    try:
+        return datetime.strptime(value.strip(), TS)
+    except (ValueError, AttributeError):
+        return None
+
+
+def parse_sessions(path):
+    """Parse the append-only presence note into ordered beats.
+
+    Each beat: {sid, header_ts, scope, state, last_active (raw str), effective (dt)}.
+    Robust to stray text between beats; a beat without a parseable header is ignored.
+    """
+    with open(path, encoding="utf-8") as handle:
+        lines = handle.read().splitlines()
+
+    beats = []
+    current = None
+    for line in lines:
+        header = BEAT_HEADER.match(line)
+        if header:
+            if current is not None:
+                beats.append(current)
+            current = {
+                "sid": header.group("sid").strip(),
+                "header_ts": header.group("ts"),
+                "scope": "",
+                "state": "active",
+                "last_active": header.group("ts"),
+            }
+            continue
+        if current is None:
+            continue
+        field = FIELD.match(line)
+        if field:
+            current[field.group("key")] = field.group("val").strip()
+    if current is not None:
+        beats.append(current)
+
+    for index, beat in enumerate(beats):
+        beat["order"] = index  # original file position — the final, total tie-break
+        # header_ts is guaranteed parseable (BEAT_HEADER requires the timestamp), so
+        # effective is always valid: the heartbeat when present, else the header time.
+        beat["effective"] = parse_beat_timestamp(beat["last_active"]) or parse_beat_timestamp(beat["header_ts"])
+    return beats
+
+
+def compact(beats, now, stale_minutes):
+    """Reduce all beats to the current view, classifying each session-id.
+
+    Returns (live, closed, stale): lists of (sid, beat). live beats are kept;
+    closed (last beat state==closing) and stale (last_active older than the window)
+    are dropped from the written file.
+    """
+    def rank(beat):
+        # Total, deterministic order so equal-minute beats never depend on encounter
+        # order: newer effective time wins; at the same minute a `closing` beat is
+        # terminal and wins; the original file position is the final tie-break.
+        return (beat["effective"], 1 if beat["state"].lower() == "closing" else 0, beat["order"])
+
+    latest = {}
+    for beat in beats:
+        sid = beat["sid"]
+        if sid not in latest or rank(beat) > rank(latest[sid]):
+            latest[sid] = beat
+
+    cutoff = now - timedelta(minutes=stale_minutes)
+    live, closed, stale = [], [], []
+    for sid in sorted(latest):
+        beat = latest[sid]
+        if beat["state"].lower() == "closing":
+            closed.append((sid, beat))
+        elif beat["effective"] < cutoff:
+            stale.append((sid, beat))
+        else:
+            live.append((sid, beat))
+    return live, closed, stale
+
+
+def render_note(live):
+    """Render the compacted presence note — only the live beats, deterministically."""
+    lines = [
+        "# Session presence (compacted)",
+        "<!-- compacted by session-reconcile. Append a beat to coordinate: "
+        "## <session-id> — <YYYY-MM-DD HH:MM> / - scope: / - state: active|closing / - last_active: -->",
+        "",
+    ]
+    if not live:
+        lines.append("<!-- no live sessions -->")
+        lines.append("")
+        return "\n".join(lines) + "\n"
+    for sid, beat in live:
+        lines.append(f"## {sid} — {beat['header_ts']}")
+        lines.append(f"- scope: {beat['scope']}")
+        lines.append(f"- state: {beat['state']}")
+        lines.append(f"- last_active: {beat['last_active']}")
+        lines.append("")
+    return "\n".join(lines) + "\n"
+
+
+def write_atomic(path, text):
+    """Write text to path via temp-then-rename, so an interrupted run never tears it.
+
+    The temp name is process-unique: the SessionEnd hook and the periodic tick can
+    fire at once, and a shared `.tmp` would let two runs interleave bytes into the
+    same file. Distinct temps + os.replace give a clean last-writer-wins instead.
+    """
+    tmp = f"{path}.{os.getpid()}.tmp"
+    with open(tmp, "w", encoding="utf-8") as handle:
+        handle.write(text)
+    os.replace(tmp, path)
+
+
+def newest_log_timestamp(path):
+    """The newest entry timestamp in the append-only log, or None if none parse."""
+    newest = None
+    with open(path, encoding="utf-8") as handle:
+        for line in handle:
+            match = LOG_HEADER.match(line.strip())
+            if match:
+                stamp = datetime.strptime(match.group("ts"), TS)
+                if newest is None or stamp > newest:
+                    newest = stamp
+    return newest
+
+
+def core_updated_timestamp(path):
+    """The `updated` frontmatter timestamp in core.md, or None if absent/unparseable."""
+    with open(path, encoding="utf-8") as handle:
+        for line in handle:
+            match = CORE_UPDATED.match(line.strip())
+            if match:
+                return datetime.strptime(match.group("ts"), TS)
+    return None
+
+
+def core_staleness(vault_root, has_live_session):
+    """Compare core.md's `updated` against the newest log entry (read-only).
+
+    Returns (status, detail): status in {clean, lag, stale, unknown}. A lagging cache
+    is only a drift signal when no session is live — a live tab mid-integration appends
+    to the log before the kernel flushes core.md (kernel §8/§10), so lag during active
+    work is expected, not drift. Only `stale` (lag with no live session) gates; `lag`
+    is advisory. The kernel, not this tool, reconciles core.md from the log on load
+    (DEVELOPMENT.md §4).
+    """
+    core_path = os.path.join(vault_root, CORE)
+    log_path = os.path.join(vault_root, LOG)
+    if not os.path.isfile(core_path) or not os.path.isfile(log_path):
+        return "unknown", "core.md or log.md absent"
+    core_ts = core_updated_timestamp(core_path)
+    log_ts = newest_log_timestamp(log_path)
+    if core_ts is None or log_ts is None:
+        return "unknown", "no timestamp in core.md frontmatter or no log entries"
+    if core_ts >= log_ts:
+        return "clean", f"core.md updated {core_ts.strftime(TS)} is current with the log"
+    lag = f"core.md updated {core_ts.strftime(TS)} lags latest log {log_ts.strftime(TS)}"
+    if has_live_session:
+        return "lag", f"{lag} — a live session is mid-write, so lag is expected (advisory)"
+    return "stale", f"{lag} — no live session; the cache may have lost a write, the kernel reconciles from the log on next load"
+
+
+def report(live, closed, stale, core_status, core_detail, no_note):
+    lines = ["# session-reconcile", ""]
+    if no_note:
+        lines.append("note: no memory/sessions.md — nothing to compact")
+        lines.append("")
+
+    def section(title, items):
+        lines.append(f"## {title} ({len(items)})")
+        if items:
+            for sid, beat in items:
+                scope = beat["scope"] or "(unscoped)"
+                lines.append(f"  {sid} — scope: {scope} — last_active: {beat['last_active']}")
+        else:
+            lines.append("  none")
+        lines.append("")
+
+    section("reaped (stale — presumed crashed)", stale)
+    section("dropped (clean close)", closed)
+    section("live", live)
+    lines.append("## core.md cache")
+    lines.append(f"  {core_status}: {core_detail}")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def main():
+    try:
+        vault_root, now, stale_minutes = parse_now(sys.argv)
+    except (ValueError, IndexError) as error:
+        print(f"session-reconcile: bad arguments: {error}", file=sys.stderr)
+        return 2
+    if not os.path.isdir(vault_root):
+        print(f"session-reconcile: not a directory: {vault_root}", file=sys.stderr)
+        return 2
+
+    note_path = os.path.join(vault_root, SESSIONS)
+    no_note = not os.path.isfile(note_path)
+    if no_note:
+        live, closed, stale = [], [], []
+    else:
+        beats = parse_sessions(note_path)
+        live, closed, stale = compact(beats, now, stale_minutes)
+        write_atomic(note_path, render_note(live))
+
+    core_status, core_detail = core_staleness(vault_root, bool(live))
+
+    print(report(live, closed, stale, core_status, core_detail, no_note))
+    return 1 if (stale or core_status == "stale") else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

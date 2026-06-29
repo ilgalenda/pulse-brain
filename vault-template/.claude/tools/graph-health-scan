@@ -1,0 +1,227 @@
+#!/usr/bin/env python3
+# graph-health-scan — the brain's deterministic graph-health scan.
+#
+# ONE JOB: read the per-pillar edge-maps and report the mechanically-decidable
+#   graph-health signals exactly, so the LLM never has to eyeball them.
+#   (Self-Development layer, SELF-DEVELOPMENT.md §4/§7; the tool kind, BUILDER.md §3.)
+#
+# INPUTS:  one optional argument — the vault root (default: current directory).
+#   Reads only the three edge-maps `canon/_index.md`, `dynamic/_index.md`,
+#   `inbox/_index.md` (OPERATIONS-KERNEL.md §8: columns
+#   `title · description · path · domain · tags · links`). Opens no notes.
+#
+# OUTPUTS: a deterministic, sorted text report on stdout, grouped by signal —
+#   orphans, stale edges (links to a superseded node), exact-duplicate titles, and
+#   unresolved contradictions (nodes still carrying the `edge/contradicts` tag).
+#   A `note:` line reports any pillar with no edge-map and any rows skipped as
+#   malformed, so a degraded scan is visible, never silently clean.
+#   Exit 0 when the graph is clean, 1 when any signal is found (so a caller can
+#   gate on it). Errors go to stderr with exit 2.
+#
+# BOUNDS: deterministic (same vault → same report), reads the local vault only,
+#   NO network and NO credentials (open-world work is an agent's job, S11).
+#   The judgement signals — hub overload, semantic duplicates — are NOT this
+#   tool's: hub overload the LLM reasons; semantic duplicates are the S17 substrate's
+#   job (its semantic-duplicate finder, kept separate so this tool stays deterministic
+#   and network-free — MODEL-RETRIEVAL.md §3.5).
+
+import os
+import re
+import sys
+
+PILLARS = ("canon", "dynamic", "inbox")
+EDGE_MAP = "_index.md"
+# NODE-GRAPH.md §3.2 — these edge tags sit on the node and clear when resolved, so
+# their presence in the edge-map is itself the unresolved signal.
+SUPERSEDED_TAG = "edge/supersedes"  # a superseded node carries this tag
+CONTRADICTS_TAG = "edge/contradicts"  # an unresolved contradiction carries this tag
+WIKILINK = re.compile(r"\[\[([^\]|]+)(?:\|[^\]]+)?\]\]")
+
+
+def normalise(name):
+    """Canonical match key for a node name or link target."""
+    return name.strip().lower()
+
+
+def node_name_from_path(path):
+    """A node's canonical name is its filename stem (what [[wikilinks]] resolve to)."""
+    return os.path.splitext(os.path.basename(path.strip()))[0]
+
+
+def parse_edge_map(path):
+    """Parse one `_index.md` table into a list of row dicts keyed by column name.
+
+    Robust to column reordering: the header row defines the column positions.
+    Skips malformed rows rather than failing the whole scan, and counts the skips
+    so a degraded scan is reported, never silently clean.
+    Returns (rows, skipped_count).
+    """
+    with open(path, encoding="utf-8") as handle:
+        lines = handle.read().splitlines()
+
+    header = None
+    columns = []
+    rows = []
+    skipped = 0
+    for line in lines:
+        stripped = line.strip()
+        if not stripped.startswith("|"):
+            if header is not None:
+                break  # table ended
+            continue
+        cells = [cell.strip() for cell in stripped.strip("|").split("|")]
+        if header is None:
+            lowered = [cell.lower() for cell in cells]
+            if "title" in lowered and "links" in lowered:
+                header = lowered
+                columns = header
+            continue
+        if set(cells) <= {"", *("-" * len(cell) for cell in cells)} or all(
+            set(cell) <= {"-", ":"} for cell in cells if cell
+        ):
+            continue  # separator row (|---|:--:|)
+        if len(cells) != len(columns):
+            skipped += 1  # malformed — skip safely, but count it
+            continue
+        rows.append(dict(zip(columns, cells)))
+    return rows, skipped
+
+
+def collect_nodes(vault_root):
+    """Read every present edge-map; return (nodes, missing_pillars, skipped_by_pillar).
+
+    nodes: list of dicts {name, title, path, pillar, superseded, contradicted,
+    link_targets}.
+    """
+    nodes = []
+    missing = []
+    skipped = {}
+    for pillar in PILLARS:
+        map_path = os.path.join(vault_root, pillar, EDGE_MAP)
+        if not os.path.isfile(map_path):
+            missing.append(pillar)
+            continue
+        rows, skipped_count = parse_edge_map(map_path)
+        if skipped_count:
+            skipped[pillar] = skipped_count
+        for row in rows:
+            path = row.get("path", "").strip()
+            title = row.get("title", "").strip()
+            name = node_name_from_path(path) if path else title
+            link_targets = [normalise(t) for t in WIKILINK.findall(row.get("links", ""))]
+            tags = row.get("tags", "")
+            nodes.append(
+                {
+                    "name": name,
+                    "title": title,
+                    "path": path or f"({pillar}: {title})",
+                    "pillar": pillar,
+                    "superseded": SUPERSEDED_TAG in tags,
+                    "contradicted": CONTRADICTS_TAG in tags,
+                    "link_targets": link_targets,
+                }
+            )
+    return nodes, missing, skipped
+
+
+def find_orphans(nodes, inbound):
+    """A node with no outbound links AND no inbound links — dead weight."""
+    orphans = []
+    for node in nodes:
+        if node["superseded"]:
+            continue  # a superseded node is kept for provenance, not an orphan defect
+        has_outbound = bool(node["link_targets"])
+        has_inbound = normalise(node["name"]) in inbound or normalise(node["title"]) in inbound
+        if not has_outbound and not has_inbound:
+            orphans.append(node["path"])
+    return sorted(orphans)
+
+
+def find_stale_edges(nodes, superseded_keys):
+    """A link pointing at a superseded node — should be re-pointed or pruned."""
+    stale = []
+    for node in nodes:
+        for target in node["link_targets"]:
+            if target in superseded_keys:
+                stale.append(f"{node['path']} -> [[{target}]]")
+    return sorted(stale)
+
+
+def find_duplicate_titles(nodes):
+    """Two nodes with the same normalised title — a merge candidate (exact case)."""
+    by_title = {}
+    for node in nodes:
+        if not node["title"]:
+            continue
+        by_title.setdefault(normalise(node["title"]), []).append(node["path"])
+    duplicates = []
+    for title_key, paths in by_title.items():
+        if len(paths) > 1:
+            duplicates.append(f"{title_key}: " + ", ".join(sorted(paths)))
+    return sorted(duplicates)
+
+
+def find_unresolved_contradictions(nodes):
+    """A node still carrying the `edge/contradicts` tag — a conflict never reconciled."""
+    return sorted(node["path"] for node in nodes if node["contradicted"])
+
+
+def build_inbound_set(nodes):
+    """Every node name that some other node links to (for orphan detection)."""
+    inbound = set()
+    for node in nodes:
+        inbound.update(node["link_targets"])
+    return inbound
+
+
+def report(orphans, stale, duplicates, contradictions, missing, skipped):
+    lines = ["# graph-health-scan", ""]
+    if missing:
+        lines.append(f"note: no edge-map for pillar(s): {', '.join(missing)}")
+    if skipped:
+        detail = ", ".join(f"{pillar}: {count}" for pillar, count in sorted(skipped.items()))
+        lines.append(f"note: skipped malformed rows ({detail}) — scan may under-report")
+    if missing or skipped:
+        lines.append("")
+
+    def section(title, items, render):
+        lines.append(f"## {title} ({len(items)})")
+        if items:
+            lines.extend(render(item) for item in items)
+        else:
+            lines.append("  none")
+        lines.append("")
+
+    section("orphans", orphans, lambda p: f"  {p}")
+    section("stale edges", stale, lambda e: f"  {e}")
+    section("duplicate titles", duplicates, lambda d: f"  {d}")
+    section("unresolved contradictions", contradictions, lambda c: f"  {c}")
+    return "\n".join(lines)
+
+
+def main():
+    vault_root = sys.argv[1] if len(sys.argv) > 1 else "."
+    if not os.path.isdir(vault_root):
+        print(f"graph-health-scan: not a directory: {vault_root}", file=sys.stderr)
+        return 2
+
+    nodes, missing, skipped = collect_nodes(vault_root)
+    if not nodes and len(missing) == len(PILLARS):
+        print(f"graph-health-scan: no edge-maps found under {vault_root}", file=sys.stderr)
+        return 2
+
+    inbound = build_inbound_set(nodes)
+    superseded_keys = {normalise(n["name"]) for n in nodes if n["superseded"]}
+    superseded_keys |= {normalise(n["title"]) for n in nodes if n["superseded"]}
+
+    orphans = find_orphans(nodes, inbound)
+    stale = find_stale_edges(nodes, superseded_keys)
+    duplicates = find_duplicate_titles(nodes)
+    contradictions = find_unresolved_contradictions(nodes)
+
+    print(report(orphans, stale, duplicates, contradictions, missing, skipped))
+    return 1 if (orphans or stale or duplicates or contradictions) else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

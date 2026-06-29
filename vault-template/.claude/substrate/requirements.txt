@@ -1,0 +1,17 @@
+# Model & Retrieval Substrate — dependencies
+#
+# The deterministic SHELL (the embedding INTERFACE, the StubEmbedder, the vector store,
+# indexing, re-rank, the candidate finders) is pure Python stdlib — it installs nothing
+# and runs cold for tests (`python -m substrate ... --adapter stub`).
+#
+# The real adapters are wired at S19; pin their dependencies here then (kept commented so
+# the engine ships no resolved/locked third-party surface, and the data boundary stays
+# clean — the model itself is pulled + checksum-verified at runtime, never committed):
+#
+#   # local adapter (zero-API-config, on-device): a small embedding model + runtime,
+#   #   e.g.  sentence-transformers==<pinned>   (and its torch/onnx backend)
+#   # vector store at scale (optional; the shell's per-page-shard store needs nothing):
+#   #   e.g.  sqlite-vec==<pinned>   or   numpy==<pinned>
+#   # api adapter (opt-in): the chosen provider's SDK, e.g.  voyageai==<pinned>
+#
+# Until S19, no install is required.

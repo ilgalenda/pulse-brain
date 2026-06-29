@@ -1,0 +1,77 @@
+# ─────────────────────────────────────────────────────────────
+# Pulse_Brain — engine .gitignore
+# This repo is the ENGINE: it ships architecture and templates only.
+# Live data is EXCLUDED by default — the engine ships templates and code only.
+# ─────────────────────────────────────────────────────────────
+
+# ── Live data (never in the engine) ──
+# The engine ships templates, not content. Instance data lives in Pulse-{{OWNER}}-Brain.
+/instance/
+/vault/
+Pulse-*-Brain/
+data/
+**/data/
+*.live.md
+
+# Model & Retrieval Substrate (S17) — embeddings are DERIVED live content (a lossy,
+# possibly-invertible projection of canon) + the pulled model is runtime state. The
+# engine ships the substrate CODE only; the store/vectors/model never get committed.
+# `*.shard` catches a store wherever `--store` points it, not only the default path.
+.claude/substrate/store/
+**/substrate/store/
+**/substrate/**/shards/
+*.shard
+*.vec
+*.faiss
+*.ann
+*.safetensors
+*.onnx
+*.gguf
+.pulse-model-cache/
+**/.pulse-model-cache/
+
+# ── Secrets & credentials ──
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*_secret*
+*_credentials*
+*apikey*
+*token*.json
+
+# ── Claude Code internals (settings are environment-specific) ──
+.claude/settings.json
+.claude/settings.local.json
+
+# ── Obsidian instance noise (if the dir is ever opened as a vault) ──
+# The engine ships no Obsidian config; that's per-instance. Ignore it all.
+.obsidian/
+.trash/
+
+# ── Python ──
+__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ── Node ──
+node_modules/
+dist/
+
+# ── macOS ──
+.DS_Store
+._*
+.Spotlight-V100
+.Trashes
+
+# ── Editors ──
+.vscode/
+.idea/
+*.swp
