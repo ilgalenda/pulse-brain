@@ -1,11 +1,11 @@
 ---
 type: core-memory
-active_preset:                  # the live operating lens — a preset: value from presets/ (e.g. gtm-lead | ai-orchestrator). Set via /preset. See PERSONA-PRESETS.md
+active_preset:                  # the live operating lens, a preset: value from presets/ (e.g. gtm-lead | ai-orchestrator). Set via /preset. See PERSONA-PRESETS.md
 updated:                        # YYYY-MM-DD HH:MM
 ---
 
 <!--
-TEMPLATE — core memory: the always-loaded snapshot of "where am I". Compact by
+TEMPLATE: core memory, the always-loaded snapshot of "where am I". Compact by
 design (hard size ceiling); when it grows, demote detail to the timeline ([[log]]).
 The kernel reads this first every session and updates it on close.
 See OPERATIONS-KERNEL.md §10.
@@ -14,7 +14,7 @@ See OPERATIONS-KERNEL.md §10.
 # Core memory
 
 ## Current focus
-<!-- What {{OWNER}} is working on right now — one or two lines. -->
+<!-- What {{OWNER}} is working on right now: one or two lines. -->
 
 ## Live threads
 <!-- Open workstreams, each a short line linking out: [[page]] / [[source]]. -->

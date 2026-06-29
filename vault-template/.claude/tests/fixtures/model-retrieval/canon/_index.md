@@ -1,4 +1,4 @@
-# Fixture canon — index (synthetic)
+# Fixture canon: index (synthetic)
 
 The edge-map for the Model & Retrieval Substrate fixture corpus. Synthetic test data, no
 live content. The indexer skips `_index.md` (infrastructure, not a knowledge node).

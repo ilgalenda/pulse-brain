@@ -1,6 +1,6 @@
 ---
-title:                          # REQUIRED — the term
-description:                    # REQUIRED — one sentence defining it
+title:                          # REQUIRED. The term
+description:                    # REQUIRED. One sentence defining it
 tier:                           # canon (curated) | dynamic (discovered at runtime)
 aliases: []                     # acronyms, synonyms, alternate spellings
 tags: []
@@ -13,17 +13,17 @@ updated:                        # YYYY-MM-DD
 ---
 
 <!--
-TEMPLATE — do not treat as a live note.
+TEMPLATE. Do not treat as a live note.
 GLOSSARY TERM = a short, reusable wiki definition referenced across the brain,
 living in canon/glossary/. The LLM maintains it freely as sources are integrated;
 flag contradictions per the convention in canon-note.md. Atomic: one idea, one
 file. Reference terms elsewhere with [[Term]]; cite `sources`. Editorial authority:
-CONTEXT-ENGINE.md (Canon) §1 — use a term (not an entity page) when the concept
+CONTEXT-ENGINE.md (Canon) §1. Use a term (not an entity page) when the concept
 needs a shared definition but stays small.
 -->
 
 ## Summary
-<!-- One short paragraph — the definition in brief. -->
+<!-- One short paragraph: the definition in brief. -->
 
 ## Detail
 <!-- Fuller explanation, usage, and distinctions if needed. -->

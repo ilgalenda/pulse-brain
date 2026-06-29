@@ -1,6 +1,6 @@
 ---
-title:                          # REQUIRED — the entity's canonical name
-description:                    # REQUIRED — one sentence defining it
+title:                          # REQUIRED. The entity's canonical name
+description:                    # REQUIRED. One sentence defining it
 type: entity
 entity_type:                    # person | organisation | product | protocol | concept | account
 aliases: []                     # other names this entity is known by
@@ -13,7 +13,7 @@ updated:                        # YYYY-MM-DD
 ---
 
 <!--
-TEMPLATE — do not treat as a live note.
+TEMPLATE. Do not treat as a live note.
 ENTITY = a wiki page defining a thing the brain refers to repeatedly (person,
 organisation, product, protocol, concept, account). Lives in canon/entities/.
 The LLM maintains it freely as sources are integrated; flag contradictions per
@@ -24,7 +24,7 @@ distinguishes entity vs topic vs glossary.
 -->
 
 ## Summary
-<!-- One short paragraph — what this entity is, in brief. -->
+<!-- One short paragraph: what this entity is, in brief. -->
 
 ## Detail
 <!-- The full canonical definition. -->
