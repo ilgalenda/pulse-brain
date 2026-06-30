@@ -64,8 +64,8 @@ to local, and the brain runs without it.
 2. Run **`/setup`**. It interviews you (your name, your own domains, operating presets,
    a writing sample, embedding choice) and scaffolds your private instance in a separate
    directory *outside* the engine.
-3. Launch Claude Code from your instance, open its `vault/` in Obsidian, and run **`/pulse`**
-   to wake the brain.
+3. Launch Claude Code from your instance directory, open that same folder in Obsidian, and
+   run **`/pulse`** to wake the brain.
 
 The full walkthrough, including the optional wiring (schedules, watchlist, credentials),
 is in [`SETUP.md`](SETUP.md).

@@ -61,16 +61,18 @@ python3 vault-template/.claude/tools/instantiate \
   --domains <d1,d2,…> [--preset <name>]
 ```
 
-It copies the engine tree (authority docs unstamped at the instance root, the dual-role
-`.claude/CLAUDE.md` stamped, `vault-template/` becoming `<target>/vault/`), scaffolds the owner's
-domain subdirectories, stamps the operational surfaces, seeds `core.md`/`index.md`/`log.md`, and
-**verifies no placeholder survives** (it fails closed if one does). Read its report; on a
-non-zero exit, fix the cause and re-run. Do not proceed on a failed scaffold.
+It lays out a flat instance — authority docs unstamped in `<target>/docs/`, the dual-role
+director and the operating layer in `<target>/.claude/`, and the knowledge folders at
+`<target>/` itself — repoints each instrument's (and the director's) authority-doc links to
+`docs/`, scaffolds the owner's domain subdirectories, stamps the operational surfaces, seeds
+`core.md`/`index.md`/`log.md`, and **verifies no placeholder survives** (it fails closed if
+one does). Read its report; on a non-zero exit, fix the cause and re-run. Do not proceed on a
+failed scaffold.
 
 ## 4. Fill instance content (in the new instance, not the engine)
 
 Switch to the instance. Write the owner's writing sample into
-`<target>/vault/memory/owner-voice.md` (or leave it for the owner to paste). Everything
+`<target>/memory/owner-voice.md` (or leave it for the owner to paste). Everything
 from here is the owner's private data and lives only in the instance.
 
 ## 5. Guide the machine-specific wiring
@@ -91,8 +93,8 @@ tool may not touch network or credentials):
 
 ## 6. First boot and activation
 
-Launch Claude Code **from the instance root** (so the root `.claude/CLAUDE.md` and the
-authority-doc links resolve), then open `<target>/vault` in Obsidian. Then:
+Launch Claude Code **from the instance root** (its `.claude/` holds the director and the
+commands), then open `<target>` itself in Obsidian. Then:
 
 - run [`/pulse`](../../commands/pulse.md), so the brain wakes and reads its (now real) state;
 - run [`/reindex`](../../commands/reindex.md) to build the first semantic index;

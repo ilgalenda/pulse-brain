@@ -3,17 +3,25 @@
 #
 # ONE JOB: stamp a live instance (`Pulse-<owner>-Brain`) out of the engine, exactly and
 #   safely, so a stranger's `git clone` becomes a working private brain with one command.
-#   It is the deterministic filesystem half of the instantiation kit (S19); the judgement
-#   half — the interview, the embedding choice, the cron/hook/watchlist/.env wiring — is
-#   the `/setup` skill, which collects the answers and calls this with them.
+#   It is the deterministic filesystem half of the instantiation kit; the judgement half —
+#   the interview, the embedding choice, the cron/hook/watchlist/.env wiring — is the
+#   `/setup` skill, which collects the answers and calls this with them.
 #   (Instantiation kit, SETUP.md / ARCHITECTURE.md §1; the tool kind, BUILDER.md §3.)
 #
-# TOPOLOGY (Model A — preserve the engine's nesting so every instrument→doc link
-#   resolves untouched): the instance is a stamped copy of the engine tree —
-#     <target>/                       authority docs (UNSTAMPED) + .gitignore + .env.example
-#     <target>/.claude/CLAUDE.md       the dual-role director (STAMPED)
-#     <target>/vault/                  the live Obsidian vault (stamped vault-template/*)
-#   Claude Code launches from <target>; Obsidian opens <target>/vault.
+# TOPOLOGY (flat instance — the instance root is BOTH the directory you launch Claude Code
+#   from AND the Obsidian vault, so `/pulse` finds the director and the commands in one
+#   place and the knowledge folders sit at the root where the working directory expects
+#   them):
+#     <target>/                       README + LICENSE + .env.example + generated .gitignore
+#     <target>/docs/                  the authority docs (UNSTAMPED reference copies)
+#     <target>/.claude/CLAUDE.md      the dual-role director (STAMPED)
+#     <target>/.claude/{commands,skills,agents,tools,substrate,tests,…}  the operating layer
+#     <target>/{canon,inbox,dynamic,memory,presets,_templates}            the live knowledge
+#     <target>/{index.md,log.md}      brain artefacts
+#   Claude Code launches from <target>; Obsidian opens <target>. Because the engine keeps
+#   its instruments nested under `vault-template/.claude/` (one level deeper than the
+#   instance's root `.claude/`), every authority-doc link inside an instrument is repointed
+#   here, deterministically, to `<correct depth>/docs/NAME.md` as the instance is stamped.
 #
 # INPUTS (argparse):
 #   --target PATH        (required) the instance dir to create — MUST be outside the engine.
@@ -29,13 +37,13 @@
 #   --dry-run            (optional) print the plan and exit 0 without writing.
 #
 # OUTPUTS: a deterministic report on stdout. Stamps {{OWNER}}/{{COMPANY}} on the OPERATIONAL
-#   surfaces only (vault/* + the instance .claude/CLAUDE.md); the authority docs are copied
-#   UNSTAMPED (generic instruction — stamping would mangle the passages that document the
-#   placeholder convention). Verifies no operational placeholder survives (fail closed).
-#   Exit 0 = instance created and verified (or --dry-run). Exit 1 = recoverable refusal
-#   (target non-empty, bad --domains, --preset not found). Exit 2 = hard failure (target
-#   inside the engine, engine-root missing, a placeholder survived → an INSTANTIATION-FAILED
-#   marker is left so the partial instance is never mistaken for live). Errors → stderr.
+#   surfaces only (.claude/* + the knowledge folders + README); the authority docs in docs/
+#   are copied UNSTAMPED (generic instruction — stamping would mangle the passages that
+#   document the placeholder convention). Verifies no operational placeholder survives (fail
+#   closed). Exit 0 = instance created and verified (or --dry-run). Exit 1 = recoverable
+#   refusal (target non-empty, bad --domains, --preset not found). Exit 2 = hard failure
+#   (target inside the engine, engine-root missing, a placeholder survived → an
+#   INSTANTIATION-FAILED marker is left so the partial instance is never mistaken for live).
 #
 # BOUNDS: deterministic given (engine content, args, now); the engine is only ever READ;
 #   the instance is written outside it. NO network, NO credentials — the interview and any
@@ -54,19 +62,19 @@ COMPANY_TOKEN = "{{COMPANY}}"
 CANON_ONLY_DOMAIN = "entities"
 PILLARS = ("canon", "inbox", "dynamic")
 DOMAIN_NAME = re.compile(r"^[a-z0-9][a-z0-9-]*$")  # safe dir name: kebab-case, no traversal
+DOCS_DIR = "docs"
 
-# Copied to the instance root verbatim alongside the authority *.md (UNSTAMPED reference /
-# config). .env.example seeds the owner's credential file. The engine's OWN .gitignore is
-# NOT copied — it ignores `/vault/` (engine-specific), which would ignore the INSTANCE's
-# live vault; the instance gets a generated, instance-appropriate .gitignore instead.
-ROOT_EXTRA_FILES = (".env.example", "LICENSE")
+# Copied to the instance root verbatim (UNSTAMPED reference / config). .env.example seeds the
+# owner's credential file. The engine's OWN .gitignore is NOT copied — it ignores `/vault/`
+# (engine-specific), which is meaningless for the flat instance; the instance gets a
+# generated, instance-appropriate .gitignore instead.
+ROOT_EXTRA_FILES = (".env.example", "LICENSE", "README.md")
 
 # The instance's own .gitignore: keep secrets + derived/runtime state out of git, but the
-# vault content IS the owner's brain (they may version it in a PRIVATE repo) — so, unlike
-# the engine's .gitignore, it does NOT ignore vault/.
+# knowledge folders ARE the owner's brain (they may version them in a PRIVATE repo).
 INSTANCE_GITIGNORE = """\
 # Pulse instance — secrets + derived/runtime state stay out of git.
-# Your vault/ content IS your brain; version it in a PRIVATE repo if you wish.
+# Your knowledge folders ARE your brain; version them in a PRIVATE repo if you wish.
 .env
 .env.*
 !.env.example
@@ -83,6 +91,7 @@ INSTANCE_GITIGNORE = """\
 .pulse-model-cache/
 __pycache__/
 *.pyc
+*.tmp
 .DS_Store
 """
 
@@ -100,8 +109,9 @@ def fail(message, code):
 
 
 def is_excluded(name):
-    return name in EXCLUDE_DIRS or name.startswith(".env") and name != ".env.example" \
-        or any(name.endswith(suffix) for suffix in EXCLUDE_SUFFIXES)
+    return (name in EXCLUDE_DIRS
+            or (name.startswith(".env") and name != ".env.example")
+            or any(name.endswith(suffix) for suffix in EXCLUDE_SUFFIXES))
 
 
 def copy_tree(src, dst):
@@ -118,18 +128,6 @@ def copy_tree(src, dst):
             shutil.copy2(src_path, dst_path)
 
 
-def stamp_file(path, owner, company):
-    """Replace the placeholder tokens in one text file (atomic). Binary files are skipped."""
-    try:
-        with open(path, encoding="utf-8") as handle:
-            text = handle.read()
-    except (UnicodeDecodeError, IsADirectoryError):
-        return
-    stamped = text.replace(OWNER_TOKEN, owner).replace(COMPANY_TOKEN, company)
-    if stamped != text:
-        write_atomic(path, stamped)
-
-
 def write_atomic(path, text):
     """temp-then-rename with a process-unique temp, so an interrupted write never tears a
     file (the session-reconcile precedent)."""
@@ -139,19 +137,93 @@ def write_atomic(path, text):
     os.replace(tmp, path)
 
 
+def read_text(path):
+    """Read a UTF-8 text file, or return None for a binary/non-file (skip it)."""
+    try:
+        with open(path, encoding="utf-8") as handle:
+            return handle.read()
+    except (UnicodeDecodeError, IsADirectoryError):
+        return None
+
+
+def stamp_file(path, owner, company):
+    """Replace the placeholder tokens in one text file (atomic). Binary files are skipped."""
+    text = read_text(path)
+    if text is None:
+        return
+    stamped = text.replace(OWNER_TOKEN, owner).replace(COMPANY_TOKEN, company)
+    if stamped != text:
+        write_atomic(path, stamped)
+
+
 def stamp_tree(root, owner, company):
-    """Stamp every text file under root (the operational surfaces)."""
+    """Stamp every text file under root (an operational surface)."""
     for current, dirs, files in os.walk(root):
         dirs[:] = sorted(d for d in dirs if d not in EXCLUDE_DIRS)
         for name in sorted(files):
             stamp_file(os.path.join(current, name), owner, company)
 
 
-def scaffold_domains(vault, domains):
+def doc_link_rewriter(doc_names):
+    """Build a regex + replacer that repoints every authority-doc link to `docs/NAME.md` at
+    the correct depth for the file it sits in.
+
+    The engine authors instrument links against its OWN nesting (instruments under
+    `vault-template/.claude/`, docs at the engine root). The instance is flatter (`.claude/`
+    at the root, docs under `docs/`), so each link's `../` depth is recomputed from the
+    file's location rather than blindly shifted: a link to one of the known docs becomes
+    `<n × ../>docs/NAME.md`, where n is the file's directory depth below the instance root.
+    Only the known authority docs are touched; knowledge links, cross-instrument links, and
+    bare `NAME.md §x` prose mentions (no markdown target) are left exactly as they are.
+    """
+    names = "|".join(re.escape(name) for name in sorted(doc_names))
+    # An optional #fragment is preserved, so an anchored link (`](../FOO.md#wiring)`) is
+    # repointed rather than left dangling. Only the known authority docs are matched.
+    pattern = re.compile(r"\]\((?:\.\./)*(" + names + r")\.md(#[^)]*)?\)")
+
+    def rewrite(text, depth):
+        prefix = "../" * depth
+        return pattern.sub(
+            lambda m: f"]({prefix}{DOCS_DIR}/{m.group(1)}.md{m.group(2) or ''})", text)
+
+    return rewrite
+
+
+def rewrite_doc_links(target, doc_names):
+    """Repoint authority-doc links in every operational markdown file to `docs/NAME.md`.
+
+    Runs over the instance `.claude/` tree and the root README — the operational surfaces
+    that link to the docs. The docs in `docs/` are reference copies and are left untouched
+    (they cross-link each other within the same folder).
+    """
+    rewrite = doc_link_rewriter(doc_names)
+    surfaces = [os.path.join(target, ".claude")]
+    for current, dirs, files in os.walk(os.path.join(target, ".claude")):
+        dirs[:] = sorted(d for d in dirs if d not in EXCLUDE_DIRS)
+        for name in sorted(files):
+            if name.endswith(".md"):
+                _rewrite_one(os.path.join(current, name), target, rewrite)
+    readme = os.path.join(target, "README.md")
+    if os.path.isfile(readme):
+        _rewrite_one(readme, target, rewrite)
+
+
+def _rewrite_one(path, target, rewrite):
+    text = read_text(path)
+    if text is None:
+        return
+    depth = len(os.path.dirname(os.path.relpath(path, target)).split(os.sep)) \
+        if os.path.dirname(os.path.relpath(path, target)) else 0
+    rewritten = rewrite(text, depth)
+    if rewritten != text:
+        write_atomic(path, rewritten)
+
+
+def scaffold_domains(root, domains):
     """Make each pillar's domain subdirs match the owner's list exactly (+ entities under
     canon). Removes shipped example domains not chosen; adds chosen ones with a .gitkeep."""
     for pillar in PILLARS:
-        pillar_dir = os.path.join(vault, pillar)
+        pillar_dir = os.path.join(root, pillar)
         keep = set(domains) | ({CANON_ONLY_DOMAIN} if pillar == "canon" else set())
         for existing in sorted(os.listdir(pillar_dir)):
             path = os.path.join(pillar_dir, existing)
@@ -163,21 +235,19 @@ def scaffold_domains(vault, domains):
             open(os.path.join(domain_dir, ".gitkeep"), "a").close()
 
 
-def seed_core(vault, preset, now):
+def seed_core(root, preset, now):
     """Set core.md's derivable anchors: active_preset and updated."""
-    path = os.path.join(vault, "memory", "core.md")
-    with open(path, encoding="utf-8") as handle:
-        text = handle.read()
+    path = os.path.join(root, "memory", "core.md")
+    text = read_text(path)
     text = re.sub(r"(?m)^active_preset:.*$", f"active_preset: {preset or ''}".rstrip(), text)
     text = re.sub(r"(?m)^updated:.*$", f"updated: {now}", text)
     write_atomic(path, text)
 
 
-def seed_index(vault, domains):
+def seed_index(root, domains):
     """Regenerate index.md's `## Domains` block from the owner's domains."""
-    path = os.path.join(vault, "index.md")
-    with open(path, encoding="utf-8") as handle:
-        text = handle.read()
+    path = os.path.join(root, "index.md")
+    text = read_text(path)
     block = ["## Domains", "<!-- For each domain, link the key entry pages of the wiki. -->"]
     block += [f"- **{d}** — <!-- key entry pages -->" for d in domains]
     block.append(f"- **{CANON_ONLY_DOMAIN}** (canon-only) —")
@@ -188,33 +258,34 @@ def seed_index(vault, domains):
     write_atomic(path, new_text if count else text + "\n\n" + rebuilt + "\n")
 
 
-def seed_log(vault, owner, domains, now):
+def seed_log(root, owner, domains, now):
     """Append the first evolution-log entry: the instance was created."""
-    path = os.path.join(vault, "log.md")
-    with open(path, encoding="utf-8") as handle:
-        text = handle.read().rstrip("\n")
+    path = os.path.join(root, "log.md")
+    text = read_text(path).rstrip("\n")
     entry = (
         f"\n\n## {now} — Brain instantiated\n"
         f"- **what:** instance created from the Pulse_Brain engine\n"
         f"- **where:** all pillars (canon · inbox · dynamic), domains: {', '.join(domains)}\n"
-        f"- **why:** setup (S19 instantiation kit)\n"
+        f"- **why:** setup (instantiation kit)\n"
     )
     write_atomic(path, text + entry)
 
 
-def find_placeholders(root):
-    """Return the operational files that still contain a placeholder token (should be none)."""
+def find_placeholders(root, skip_dirs):
+    """Return the files under root that still contain a placeholder token (should be none).
+
+    `skip_dirs` are absolute paths pruned from the walk — the docs/ reference copies, which
+    legitimately keep {{OWNER}} in the passages that document the placeholder convention.
+    """
     offenders = []
+    skip = {os.path.realpath(d) for d in skip_dirs}
     for current, dirs, files in os.walk(root):
-        dirs[:] = [d for d in dirs if d not in EXCLUDE_DIRS]
+        dirs[:] = [d for d in dirs if d not in EXCLUDE_DIRS
+                   and os.path.realpath(os.path.join(current, d)) not in skip]
         for name in sorted(files):
             path = os.path.join(current, name)
-            try:
-                with open(path, encoding="utf-8") as handle:
-                    text = handle.read()
-            except (UnicodeDecodeError, IsADirectoryError):
-                continue
-            if OWNER_TOKEN in text or COMPANY_TOKEN in text:
+            text = read_text(path)
+            if text is not None and (OWNER_TOKEN in text or COMPANY_TOKEN in text):
                 offenders.append(path)
     return offenders
 
@@ -240,19 +311,47 @@ def resolve_engine_root(explicit):
     return os.path.realpath(os.path.join(here, "..", "..", ".."))
 
 
+def authority_docs(engine_root):
+    """The engine-root authority docs (every root .md except README), sorted. These become
+    the instance's docs/ reference copies and the set whose links are repointed."""
+    return sorted(name for name in os.listdir(engine_root)
+                  if name.endswith(".md") and name != "README.md"
+                  and os.path.isfile(os.path.join(engine_root, name)))
+
+
 def main(argv):
     args = parse_args(argv)
 
+    if not args.owner.strip() or not args.company.strip():
+        return fail("--owner and --company must be non-empty", 1)
+
     engine_root = resolve_engine_root(args.engine_root)
-    if not os.path.isfile(os.path.join(engine_root, "ARCHITECTURE.md")) or \
-            not os.path.isdir(os.path.join(engine_root, "vault-template")):
-        return fail(f"engine root not found or malformed: {engine_root}", 2)
+    # Pre-flight the structure AND the seed templates, so a missing template fails closed
+    # here (exit 2, nothing written) rather than crashing mid-run after the tree is copied,
+    # which would leave a stamped-but-unseeded partial instance with no failure marker.
+    required = [
+        os.path.join(engine_root, "ARCHITECTURE.md"),
+        os.path.join(engine_root, ".claude", "CLAUDE.md"),
+        os.path.join(engine_root, "vault-template", "memory", "core.md"),
+        os.path.join(engine_root, "vault-template", "index.md"),
+        os.path.join(engine_root, "vault-template", "log.md"),
+    ]
+    if not os.path.isdir(os.path.join(engine_root, "vault-template")) \
+            or any(not os.path.isfile(path) for path in required):
+        return fail(f"engine root not found or malformed (a required template is missing): "
+                    f"{engine_root}", 2)
 
     target = os.path.realpath(os.path.expanduser(args.target))
 
-    # --- data-boundary guard: never write inside the engine -------------------------------
-    if target == engine_root or os.path.commonpath([target, engine_root]) == engine_root:
-        return fail(f"refusing: target is inside the engine repo ({engine_root}). "
+    # --- data-boundary guard: never write inside, equal to, or astride the engine ---------
+    # normcase so the guard holds on a case-insensitive filesystem (the macOS default); the
+    # equal / inside / ancestor cases are ALL hard refusals (exit 2), so the boundary never
+    # rides on the later, softer non-empty-target check.
+    cased_target = os.path.normcase(target)
+    cased_engine = os.path.normcase(engine_root)
+    shared = os.path.commonpath([cased_target, cased_engine])
+    if cased_target == cased_engine or shared == cased_engine or shared == cased_target:
+        return fail(f"refusing: target overlaps the engine repo ({engine_root}). "
                     "The instance MUST be a separate directory outside the engine.", 2)
 
     domains = [d.strip() for d in args.domains.split(",") if d.strip()]
@@ -282,37 +381,55 @@ def main(argv):
             return fail(f'--now must be "YYYY-MM-DD HH:MM": {args.now}', 1)
     now = (args.now or datetime.now().strftime(TS)).strip()
 
+    docs = authority_docs(engine_root)
+    doc_names = [name[:-3] for name in docs]  # basenames without ".md"
+
     if args.dry_run:
         print(plan_report(engine_root, target, args, domains, now))
         return 0
 
-    # --- copy the engine tree (Model A) ---------------------------------------------------
+    # --- copy the engine into the flat instance -------------------------------------------
     os.makedirs(target, exist_ok=True)
-    for name in sorted(os.listdir(engine_root)):
-        if name.endswith(".md") or name in ROOT_EXTRA_FILES:
-            src = os.path.join(engine_root, name)
-            if os.path.isfile(src):
-                shutil.copy2(src, os.path.join(target, name))
-    # the dual-role director, at instance root
-    os.makedirs(os.path.join(target, ".claude"), exist_ok=True)
+    # root reference/config files
+    for name in ROOT_EXTRA_FILES:
+        src = os.path.join(engine_root, name)
+        if os.path.isfile(src):
+            shutil.copy2(src, os.path.join(target, name))
+    # authority docs → docs/ (unstamped reference copies)
+    docs_dir = os.path.join(target, DOCS_DIR)
+    os.makedirs(docs_dir, exist_ok=True)
+    for name in docs:
+        shutil.copy2(os.path.join(engine_root, name), os.path.join(docs_dir, name))
+    # the operating layer → .claude/ : the dual-role director + the instruments
+    claude_dir = os.path.join(target, ".claude")
+    os.makedirs(claude_dir, exist_ok=True)
     shutil.copy2(os.path.join(engine_root, ".claude", "CLAUDE.md"),
-                 os.path.join(target, ".claude", "CLAUDE.md"))
+                 os.path.join(claude_dir, "CLAUDE.md"))
+    copy_tree(os.path.join(engine_root, "vault-template", ".claude"), claude_dir)
+    # the live knowledge (everything in vault-template except its .claude and its README) → root
+    vault_template = os.path.join(engine_root, "vault-template")
+    for name in sorted(os.listdir(vault_template)):
+        if name in (".claude", "README.md") or is_excluded(name):
+            continue
+        src = os.path.join(vault_template, name)
+        dst = os.path.join(target, name)
+        if os.path.isdir(src):
+            copy_tree(src, dst)
+        else:
+            shutil.copy2(src, dst)
     # the instance's own .gitignore (generated — NOT the engine's, which ignores vault/)
     write_atomic(os.path.join(target, ".gitignore"), INSTANCE_GITIGNORE)
-    # the live vault
-    vault = os.path.join(target, "vault")
-    copy_tree(os.path.join(engine_root, "vault-template"), vault)
 
-    # --- scaffold owner domains, stamp operational surfaces, seed empty state --------------
-    scaffold_domains(vault, domains)
-    stamp_tree(vault, args.owner, args.company)
-    stamp_file(os.path.join(target, ".claude", "CLAUDE.md"), args.owner, args.company)
-    seed_core(vault, args.preset, now)
-    seed_index(vault, domains)
-    seed_log(vault, args.owner, domains, now)
+    # --- scaffold domains, stamp operational surfaces, repoint doc links, seed state -------
+    scaffold_domains(target, domains)
+    stamp_target(target, docs_dir, args.owner, args.company)
+    rewrite_doc_links(target, doc_names)
+    seed_core(target, args.preset, now)
+    seed_index(target, domains)
+    seed_log(target, args.owner, domains, now)
 
     # --- verify no operational placeholder survives (fail closed) -------------------------
-    offenders = find_placeholders(vault) + find_placeholders(os.path.join(target, ".claude"))
+    offenders = find_placeholders(target, skip_dirs=[docs_dir])
     if offenders:
         marker = os.path.join(target, "INSTANTIATION-FAILED")
         write_atomic(marker, "Placeholders survived stamping in:\n" + "\n".join(offenders) + "\n")
@@ -321,6 +438,20 @@ def main(argv):
 
     print(done_report(target, args, domains, now))
     return 0
+
+
+def stamp_target(target, docs_dir, owner, company):
+    """Stamp every operational surface under target, leaving the docs/ reference copies
+    untouched (they carry the placeholder-convention passages, kept generic)."""
+    docs_real = os.path.realpath(docs_dir)
+    for name in sorted(os.listdir(target)):
+        path = os.path.join(target, name)
+        if os.path.realpath(path) == docs_real:
+            continue
+        if os.path.isdir(path):
+            stamp_tree(path, owner, company)
+        else:
+            stamp_file(path, owner, company)
 
 
 def plan_report(engine_root, target, args, domains, now):
@@ -332,9 +463,11 @@ def plan_report(engine_root, target, args, domains, now):
         f"  domains: {', '.join(domains)} (+ {CANON_ONLY_DOMAIN} in canon)\n"
         f"  preset:  {args.preset or '(none)'}\n"
         f"  now:     {now}\n"
-        "  would: copy authority docs (unstamped) + .claude/CLAUDE.md (stamped) to <target>; "
-        "copy vault-template -> <target>/vault; scaffold domains; stamp operational surfaces; "
-        "seed core/index/log; verify no placeholder survives."
+        "  would: lay out a flat instance — docs/ (authority docs, unstamped), "
+        ".claude/ (director + operating layer, stamped), and the knowledge folders at the "
+        "root; scaffold domains; stamp operational surfaces; repoint authority-doc links to "
+        "docs/; seed core/index/log; verify no placeholder survives.\n"
+        "  launch: from <target> itself (Claude Code AND Obsidian open the instance root)."
     )
 
 
@@ -345,7 +478,7 @@ def done_report(target, args, domains, now):
         f"  owner:   {args.owner}    company: {args.company}\n"
         f"  domains: {', '.join(domains)} (+ {CANON_ONLY_DOMAIN} in canon)\n"
         f"  preset:  {args.preset or '(none)'}    seeded: {now}\n"
-        "  next: launch Claude Code from <target> and run /pulse; open <target>/vault in Obsidian.\n"
+        "  next: launch Claude Code from <target> and run /pulse; open <target> in Obsidian.\n"
         "  the instance is OUTSIDE the engine and never committed to it."
     )
 

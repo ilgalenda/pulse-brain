@@ -51,18 +51,23 @@ and use daily. This page is the procedure. (For what Pulse *is* and how it works
 
 ## First boot
 
-Your instance has this shape (the authority docs sit at the instance root so the
-instruments' links resolve; your live vault is the `vault/` subfolder):
+Your instance is a single flat directory: the root is both where you launch Claude Code and
+the vault you open in Obsidian. The director and the commands live together in its
+`.claude/`, your knowledge sits at the root, and the authority docs are tucked in `docs/`:
 
 ```
-Pulse-<you>-Brain/
-├── (the authority docs — your reference copies)
-├── .claude/CLAUDE.md        the dual-role director
-└── vault/                   ← open THIS in Obsidian
+Pulse-<you>-Brain/           ← launch Claude Code here, AND open this in Obsidian
+├── docs/                    the authority docs (your reference copies)
+├── .claude/
+│   ├── CLAUDE.md            the dual-role director
+│   └── commands/ skills/ …  the operating layer (so /pulse and the rest resolve)
+└── canon/ inbox/ dynamic/ memory/ …   your live knowledge
 ```
 
-- **Launch Claude Code from the instance root** (`Pulse-<you>-Brain/`).
-- **Open `vault/` in Obsidian** as your vault.
+- **Launch Claude Code from the instance root** (`Pulse-<you>-Brain/`): its `.claude/` holds
+  both the director and the commands.
+- **Open the same folder in Obsidian** as your vault. Your knowledge is at the root; `docs/`
+  is reference and `.claude/` is hidden.
 - Run **`/pulse`**: the brain wakes, reads its state, and greets you.
 - Add your first sources (drop notes/URLs into `inbox/`, or just talk to it), and run
   **`/reindex`** once you want semantic retrieval over what you've compiled.

@@ -5,24 +5,35 @@ described in [`SETUP.md`](../../../SETUP.md), [`ARCHITECTURE.md` §1](../../../A
 It has two halves. **Part A** covers the [`instantiate`](../tools/instantiate) tool's
 deterministic guarantees; **Part B** covers the [`setup`](../skills/setup/SKILL.md) skill's
 judgement responsibilities. The governing rule throughout: **the instance is created OUTSIDE
-the engine and never committed to it**, and the **Model A topology** holds (the instance
-preserves the engine's nesting so every instrument-to-authority-doc link resolves untouched).
-This restates the authority as a *test*, not a new authority. If any item fails, the kit is
-not correct.
+the engine and never committed to it**, and the **flat-instance topology** holds (the
+instance root is both the directory Claude Code launches from and the Obsidian vault, so the
+director and the commands load together and the knowledge sits where the working directory
+expects it). This restates the authority as a *test*, not a new authority. If any item fails,
+the kit is not correct.
 
 ## Part A: the `instantiate` tool
 
-- [ ] **Model-A topology.** The instance is `<target>/` with the authority docs +
-      `.gitignore` + `.env.example` + `.claude/CLAUDE.md` at the root, and the live vault at
-      `<target>/vault/` (the stamped `vault-template/` contents). A sampled
-      instrument-to-doc link (for example a skill's `../../../../OPERATIONS-KERNEL.md`)
-      **resolves to a real file** in the instance, proving the nesting was preserved.
-- [ ] **Operational stamping, docs left alone.** `{{OWNER}}`/`{{COMPANY}}` are stamped in
-      the **operational surfaces only** (`vault/**` + the instance `.claude/CLAUDE.md`); the
-      authority docs at the instance root are copied **UNSTAMPED** (a generic instruction:
-      stamping would mangle the passages that document the placeholder convention). After a
-      run, **no `{{OWNER}}`/`{{COMPANY}}` remains in the operational tree**; the tool
-      **fails closed** (exit 2 + an `INSTANTIATION-FAILED` marker) if any survives.
+- [ ] **Flat topology.** The instance is `<target>/` with `README` + `LICENSE` +
+      `.env.example` + a generated `.gitignore` at the root; the authority docs in
+      `<target>/docs/`; the dual-role director and the whole operating layer in
+      `<target>/.claude/` (`CLAUDE.md`, `commands/`, `skills/`, `agents/`, `tools/`,
+      `substrate/`, `tests/`, …); and the live knowledge (`canon/inbox/dynamic/memory/
+      presets/_templates` + `index.md`/`log.md`) at the root. Launching from `<target>`
+      resolves the commands (root `.claude/commands/`) and the director (root
+      `.claude/CLAUDE.md`).
+- [ ] **Authority-doc links repointed.** Because the engine nests its instruments one level
+      deeper (`vault-template/.claude/`) than the instance's root `.claude/`, every
+      authority-doc link inside an instrument **and the director** is rewritten to
+      `<correct-depth>/docs/NAME.md` for that file's location. A sampled link (a command's
+      `../../docs/OPERATIONS-KERNEL.md`, a skill's `../../../docs/THINKING.md`, the director's
+      `../docs/PRINCIPLES.md`) **resolves to a real file**. Knowledge links, cross-instrument
+      links, and bare prose mentions are **untouched**.
+- [ ] **Operational stamping, docs left alone.** `{{OWNER}}`/`{{COMPANY}}` are stamped in the
+      **operational surfaces only** (`.claude/**` + the knowledge folders + `README`); the
+      authority docs in `docs/` are copied **UNSTAMPED** (a generic instruction: stamping
+      would mangle the passages that document the placeholder convention). After a run, **no
+      `{{OWNER}}`/`{{COMPANY}}` remains in the operational tree**; the tool **fails closed**
+      (exit 2 + an `INSTANTIATION-FAILED` marker) if any survives.
 - [ ] **Owner-defined domains.** Each pillar's domain subdirs match `--domains` exactly
       (with a `.gitkeep`); shipped example domains not chosen are removed; `entities` is
       added to `canon/` only and is never a chosen domain.
@@ -34,13 +45,21 @@ not correct.
       model artefacts, `.env` (not `.env.example`), `__pycache__/` are **not** copied, so no
       stale runtime state or secret rides into the instance.
 - [ ] **Instance `.gitignore` is instance-appropriate.** It is generated, NOT the engine's:
-      it keeps `vault/` (the owner's brain, versionable privately) but excludes secrets +
-      derived state (`.env`, `.obsidian/`, `**/substrate/store/`, `*.shard`, model cache).
-- [ ] **Data-boundary guard (the load-bearing one).** A target **inside the engine** (the
-      engine root, `vault-template`, or any subpath) gives **exit 2, nothing written**. A
-      **non-empty** target gives exit 1 (re-instantiation is a deliberate delete-and-recreate,
-      never a silent overwrite). A `--preset` naming a preset that doesn't exist gives exit 1
-      **before any copy** (no half-built instance left behind). The engine is only ever READ.
+      it keeps the knowledge folders (the owner's brain, versionable privately) but excludes
+      secrets + derived state (`.env`, `.obsidian/`, `**/substrate/store/`, `*.shard`,
+      `*.tmp`, model cache).
+- [ ] **Data-boundary guard (the load-bearing one).** A target that is **inside**, **equal
+      to**, or an **ancestor of** the engine (the engine root, `vault-template`, any subpath,
+      or a parent directory) gives **exit 2, nothing written** — case-insensitively, so the
+      guard holds on the macOS default filesystem. A **non-empty** target gives exit 1
+      (re-instantiation is a deliberate delete-and-recreate, never a silent overwrite). A
+      `--preset` naming a preset that doesn't exist, or an empty `--owner`/`--company`, gives
+      exit 1 **before any copy** (no half-built instance left behind). The engine is only ever
+      READ.
+- [ ] **Fails closed on a malformed engine.** A missing required template (`ARCHITECTURE.md`,
+      `.claude/CLAUDE.md`, `vault-template/{memory/core.md,index.md,log.md}`) gives exit 2
+      **before any copy**, never a crash mid-run that strands a stamped-but-unseeded partial
+      instance.
 - [ ] **Deterministic and least-privilege.** The same `(engine content, args, --now)` gives
       the same instance; `--now` makes seeded timestamps reproducible; `--dry-run` prints the
       plan and writes nothing; **no network, no credentials**. Exit 0 success, 1 recoverable
@@ -62,8 +81,9 @@ not correct.
 - [ ] **Boundary discipline.** Never scaffolds into the engine; fills owner content (voice
       sample, `.env`, bindings) in the **instance**, not the engine; surfaces a **Pulse
       decision** recording what was instantiated.
-- [ ] **Hands off.** Launch from the instance root, open `vault/` in Obsidian, `/pulse`,
-      then `/reindex`; threshold calibration + turning re-ranking on once real content exists.
+- [ ] **Hands off.** Launch from the instance root, open that same folder in Obsidian,
+      `/pulse`, then `/reindex`; threshold calibration + turning re-ranking on once real
+      content exists.
 
 ## Worked PASS example (a cold run)
 
@@ -76,29 +96,32 @@ not correct.
 > ```
 >
 > Result: exit 0, "instance created and verified clean". The instance has the authority docs
-> at its root (unstamped, still `{{OWNER}}`), `.claude/CLAUDE.md` stamped to "Test Owner",
-> and `vault/` with `canon/inbox/dynamic` each holding `work/people/reference` (+ `entities`
-> under canon), example domains gone. `core.md` reads `active_preset: gtm-lead`; `index.md`'s
+> in `docs/` (unstamped, still `{{OWNER}}`), `.claude/CLAUDE.md` stamped to "Test Owner" with
+> its doc links repointed to `../docs/…`, the operating layer in `.claude/`, and
+> `canon/inbox/dynamic` at the root each holding `work/people/reference` (+ `entities` under
+> canon), example domains gone. `core.md` reads `active_preset: gtm-lead`; `index.md`'s
 > Domains list is the three chosen; `log.md` has the instantiated entry. A grep of the
-> operational tree for `{{OWNER}}`/`{{COMPANY}}` returns nothing; a skill's `../../../../`
-> doc link resolves; the instance `.gitignore` does not ignore `vault/`.
+> operational tree for `{{OWNER}}`/`{{COMPANY}}` returns nothing; a command's `../../docs/`
+> doc link resolves; the instance `.gitignore` does not ignore the knowledge folders.
 
-*Why this is correct:* the structure is preserved (links resolve), only operational
-surfaces are stamped (docs stay correct), domains are the owner's, and the instance sits
-outside the engine. A clean, runnable brain with the data boundary intact.
+*Why this is correct:* the links resolve (repointed to `docs/`), only operational surfaces
+are stamped (docs stay correct), domains are the owner's, the instance launches from its own
+root, and it sits outside the engine. A clean, runnable brain with the data boundary intact.
 
 ## FAIL examples the kit must NOT produce
 
 - **Scaffolding inside the engine.** Any write into the engine repo (its `vault-template/`
-  or root); the tool must exit 2 and write nothing.
+  or root), or a target equal to / an ancestor of the engine; the tool must exit 2 and write
+  nothing.
 - **A surviving placeholder treated as success.** An operational file still containing
   `{{OWNER}}`/`{{COMPANY}}` after a run reported clean.
 - **Stamping the authority docs.** Rewriting `{{OWNER}}` in ARCHITECTURE and the like, so the
   placeholder-convention passages read nonsensically ("… stands in for Ann …").
-- **Broken instrument links.** A flattened instance where `../../../../X.md` overshoots
-  the root and resolves to nothing.
-- **The engine's `.gitignore` copied verbatim.** Ignoring the instance's own `vault/`
-  (because the engine ignores `/vault/`), hiding the owner's brain from their own git.
+- **A doc link that resolves to nothing.** An instrument or the director whose authority-doc
+  link was not repointed to the instance's `docs/` at the right depth (overshooting the root,
+  or still pointing at a now-nonexistent root `.md`).
+- **The engine's `.gitignore` copied verbatim.** Ignoring the instance's own knowledge
+  folders, hiding the owner's brain from their own git.
 - **A secret or stale store copied in.** An `.env`, a `*.shard`/`*.vec`, `substrate/store/`,
   or `.obsidian/` riding from the engine into the instance.
 - **The tool reaching the network or a credential.** The deterministic scaffold must do
